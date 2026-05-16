@@ -246,6 +246,17 @@ export class TeamsHttpStream {
     return this.finalized;
   }
 
+  /**
+   * Final / accumulated text delivered through the stream.
+   *
+   * Exposed so the reply-dispatcher can emit the canonical `message:sent`
+   * internal hook with the actual reply content when delivery happened via
+   * the streaming card path (which bypasses `flushPendingMessages`).
+   */
+  get accumulatedTextSnapshot(): string {
+    return this.accumulatedText;
+  }
+
   /** Whether streaming fell back (not used in this implementation). */
   get isFallback(): boolean {
     return false;

@@ -109,5 +109,21 @@ export function createTeamsReplyStreamController(params: {
     hasStream(): boolean {
       return Boolean(stream);
     },
+
+    /**
+     * Snapshot of the text that was streamed to Teams via the streaming card
+     * path (TeamsHttpStream). Used by the reply-dispatcher to populate the
+     * canonical `message:sent` internal-hook event when delivery happened via
+     * streaming (which bypasses `flushPendingMessages`). Returns an empty
+     * string when there is no stream or no text accumulated yet.
+     */
+    streamedContent(): string {
+      return stream?.accumulatedTextSnapshot ?? "";
+    },
+
+    /** Whether the stream has been finalized (used to gate post-finalize hooks). */
+    isFinalized(): boolean {
+      return Boolean(stream?.isFinalized);
+    },
   };
 }

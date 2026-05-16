@@ -290,6 +290,43 @@ export function createMSTeamsReplyDispatcher(params: {
     },
   });
 
+  // Track whether the streaming path has already emitted message:sent for
+  // this turn so we don't double-fire when both stream finalize AND the
+  // flushPendingMessages fallback ran (e.g. partial-text + media split).
+  let streamMessageSentEmitted = false;
+
+  const emitStreamMessageSentIfNeeded = () => {
+    if (streamMessageSentEmitted) {
+      return;
+    }
+    if (!streamController.hasStream() || !streamController.isFinalized()) {
+      return;
+    }
+    const content = streamController.streamedContent();
+    if (!content) {
+      return;
+    }
+    streamMessageSentEmitted = true;
+    const isGroup =
+      conversationType === "groupchat" || conversationType === "channel";
+    const recipientAad =
+      params.conversationRef.user?.aadObjectId ??
+      params.conversationRef.aadObjectId;
+    const conversationId = params.conversationRef.conversation?.id;
+    const to =
+      !isGroup && recipientAad ? recipientAad : (conversationId ?? "unknown");
+    emitMSTeamsMessageSentHooks({
+      sessionKeyForInternalHooks: params.sessionKey,
+      to,
+      conversationId,
+      accountId: params.accountId,
+      content,
+      success: true,
+      isGroup,
+      groupId: isGroup ? conversationId : undefined,
+    });
+  };
+
   const markDispatchIdle = (): Promise<void> => {
     return flushPendingMessages()
       .catch((err) => {
@@ -307,6 +344,14 @@ export function createMSTeamsReplyDispatcher(params: {
         return streamController.finalize().catch((err) => {
           params.log.debug?.("stream finalize failed", { error: formatUnknownError(err) });
         });
+      })
+      .then(() => {
+        // After the stream finalizes, emit message:sent for the streamed
+        // content so downstream hook handlers (per-user memory loggers,
+        // audit substrates) see the agent's reply. Streaming bypasses
+        // flushPendingMessages entirely; without this emit, streamed
+        // personal-DM replies are silent on the hook bus.
+        emitStreamMessageSentIfNeeded();
       })
       .finally(() => {
         baseMarkDispatchIdle();

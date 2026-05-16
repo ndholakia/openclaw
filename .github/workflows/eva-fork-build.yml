@@ -1,0 +1,118 @@
+name: EVA Fork — Build & Push OpenClaw Base Image
+
+# Builds the OpenClaw gateway base image from this fork's HEAD and pushes
+# to EVA's private ECR (account 835175800135, us-east-1). Used to ship
+# fork-only patches (msteams message:sent hook + future upstream-pending
+# fixes) without waiting for upstream merge cycles.
+#
+# Trust: federates with `eva-os-image-push` IAM role via GitHub OIDC.
+# Trust policy gates to:
+#   repo:ndholakia/openclaw:ref:refs/heads/fix/*
+#   repo:ndholakia/openclaw:ref:refs/heads/eva/*
+#
+# Triggered on every push to those branches AND via workflow_dispatch.
+# Produces tags:
+#   - <12-char-sha>  (immutable, used by downstream Dockerfiles)
+#   - <branch-name>  (mutable, latest of the branch)
+
+on:
+  push:
+    branches:
+      - "fix/**"
+      - "eva/**"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Override tag (default: 12-char short SHA)"
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: eva-fork-build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: "835175800135"
+  ROLE_ARN: arn:aws:iam::835175800135:role/eva-os-image-push
+  ECR_REPO: eva-openclaw-base
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute tags
+        id: tags
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            SHA_TAG="${{ inputs.tag }}"
+          else
+            SHA_TAG=$(git rev-parse --short=12 HEAD)
+          fi
+          # GitHub branch-ref → sanitized docker tag (slashes → dashes)
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          BRANCH_TAG=$(echo "$BRANCH" | tr '/' '-')
+          echo "sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          echo "branch_tag=${BRANCH_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Tags: ${SHA_TAG}, ${BRANCH_TAG}"
+
+      - name: Free disk space (GHA runner)
+        # OpenClaw multi-stage build is large; clear unused stock tooling
+        # to keep the runner's 14GB ephemeral disk from filling up.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-openclaw-${{ github.run_id }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push base image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}:${{ steps.tags.outputs.sha_tag }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}:${{ steps.tags.outputs.branch_tag }}
+          cache-from: type=gha,scope=eva-openclaw-base
+          cache-to: type=gha,scope=eva-openclaw-base,mode=max
+          platforms: linux/amd64
+          provenance: false
+
+      - name: Summary
+        run: |
+          {
+            echo "## OpenClaw base image pushed"
+            echo ""
+            echo "**Branch:** \`${GITHUB_REF#refs/heads/}\`"
+            echo ""
+            echo "**Tags:**"
+            echo "- \`${{ steps.tags.outputs.sha_tag }}\` (immutable, use this in downstream Dockerfiles)"
+            echo "- \`${{ steps.tags.outputs.branch_tag }}\` (latest of branch)"
+            echo ""
+            echo "**Registry:** \`${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}\`"
+            echo ""
+            echo "**Downstream consumer**: \`OpenClaw/patches/Dockerfile\` in ndholakia/EVA-VE"
+            echo "should set \`ARG OPENCLAW_IMAGE=${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}:${{ steps.tags.outputs.sha_tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
